@@ -12,7 +12,7 @@ based on linux kernel 4.15, default for ubuntu 16.04LTS
 
 
 
-### ways to get syscall table load address
+### 0.1 ways to get syscall table load address
 
 #### 1.The simplest way: *kallsyms_lookup_name()*
 
@@ -44,9 +44,37 @@ Refer to [this post](https://infosecwriteups.com/linux-kernel-module-rootkit-sys
 
 
 
-### ways to get current task_struct
+### 0.2 ways to get current task_struct
 
 ​	When debuging a kernel with debug info, there is a global variable names *current_task* pointing to current *task_struct*. When programing a kernel module, there is a macro *current* which will give us the pointer to the current *task_struct*, the macro is defined in *arch/x86/include/asm/current.h*(for x86 machine).
+
+
+
+### 0.3 ways to compile a kernel module for a pre-compiled kernel
+
+​	Generally we compile and load a module in the same kernel environment, but indeed there are some times when we need to build a kernel module here and load it to some other kernels. Or when we want to build a module and load it to a tiny version of kernel in QEMU to debug it, it is impractical to build a compile system in the tiby version of kernel, and even the tiny version has the same version as the kernel you build the module, there could still be difference(subversion of the kernel) between them which can cause module loading failure.
+
+​	Correct way to do it is as follows:
+
+1. you download the Linux kernel souce ---- which is also needed when we build it and load it with QEMU
+
+2. write the Makefile as follows
+
+   ```makefile
+   obj-m := rootkit.o
+   KERNELDIR := ../linux-5.4
+   PWD := $(shell pwd)
+   OUTPUT := $(obj-m) $(obj-m:.o=.ko) $(obj-m:.o=.mod.o) $(obj-m:.o=.mod.c)
+   
+   modules:
+           $(MAKE) -C $(KERNELDIR) M=$(PWD) modules
+   
+   ```
+
+
+3. make
+
+​	The module you get should have no problem loading into the QEMU virtual machine. The idea is similar when you want to build a kernel module for a pre-compiled kernel version.
 
 
 
@@ -612,7 +640,7 @@ struct module {
 
 
 
-> The file */proc/modules* should have a special *file_operations* whose *read*  will traverse the single-linked list of the modules and return the name and some basic information. But I didn't find the implementatino of this file when writing this post : (
+> The file /proc/modules is a special virtual file called **sequence file**. Its implementation is in /kernel/module.c, in which defines the seq-related functions(names *m_start*, *m_show*, ...) to print formatted information of each module by traversing the single-linked list. The creation of this virtual file is by *proc_modules_init()*, read the source code for more detial
 
 
 
