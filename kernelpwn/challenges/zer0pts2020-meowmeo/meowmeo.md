@@ -292,3 +292,17 @@ So instead of hijack the kernel stack by value in `rbx` we can use `r8` or `r12`
 
 
 
+
+
+# some thinking
+
+## a side-channel solve
+
+​	The vulnerability allows us to perform overread and overwrite through `llseek`. If we `llseek` the offset with a very large value, we may achieve an arbitrary memory read and write. 
+
+
+
+## reference
+
+1.https://pr0cf5.github.io/ctf/2020/03/09/the-plight-of-tty-in-the-linux-kernel.html
+

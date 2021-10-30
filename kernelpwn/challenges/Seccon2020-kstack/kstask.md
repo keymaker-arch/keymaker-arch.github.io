@@ -215,7 +215,7 @@ for(int i=0;i<0x100;i++){
 
 ### 3.overwrite a *seq_operations* struct: setxattr
 
-​	In last step we caused a double freed chunk. Now we place a *struct seq_operations* to it by opening the sequence file */proc/self/stat*. Since the chunk is double-freed, if we allocate a 32 bytes chunk now we will get it again, giving us the oppurtunity to overwrite the function pointers in the struct.
+​	In last step we caused a double freed chunk. Now we place a *struct seq_operations* to it by opening the sequence file */proc/self/stat*. Since the chunk is double-freed, if we allocate a 32 bytes chunk now we will get it again, giving us the opportunity to overwrite the function pointers in the struct.
 
 ​	We can use *setxattr* to get the chunk again and write data to it. Here comes the tricky part: we put the data we are going to write to a mmap region whose layout will be
 
