@@ -91,7 +91,7 @@ When the execution hit the break point the address of *modprobe_path* will be at
 
 
 
-## 6. use *setxattr* to write arbitrary data to kernel
+## 6. use *setxattr* to write arbitrary data to kernel heap
 
 ​	The implementation of *setxattr* is under *fs/xattr.c* as follows
 
@@ -135,4 +135,79 @@ setxattr("/dummy_file", "dummy", start_cp_addr, 0x20, XATTR_CREATE);
 this cause the kernel to stop execute when the copy reaches the uffd-registerd page, so the chunk allocated by *setxattr* will not be immediately freed. And if we set the handler to the uffd to a simply *hang()* the chunk will never be freed.
 
 
+
+## 7. bypass FG-KASLR
+
+​	KASLR allows the kernel to be loaded at a random address, while funtion and symbols in the kernel still have a fixed offset from the load base address of the kernel
+
+​	**Function Granular ASLR**, FG-KASLR, allows each kernel funtion to be loaded at loaded at random address during the kernel boot, which means, the kernel symbols are randomized on their own and their offsets from the kernel load base address are no longer fixed.
+
+​	Some memory regions are not affected by FG-KASLR, which means they still have a fixed offset from the load base address during two boots. To by pass FG-KASLR, we make use of these regions.
+
+1. funtion from `_text` to `__x86_retpoline_r15`, which is `_text+0x400dc6` (in the case of kernel 5.9)
+2. KPTI trampoline `swapgs_restore_regs_and_return_to_usermode()`
+3. kernel symbol table `ksymtab`
+
+​	We may find some gadgets in the region from `_text` to `_text+0x400dc6`. Generally we may look for gadgets like
+
+```assembly
+pop rax; ret
+mov eax, qword ptr [rax + 0x10]; ret;
+```
+
+​	These two gadgets allows us to read arbitrary memory by setting the value of `rax`. We will read the `symtab` using the two gadgets to leak the load address of any kernel exported symbols.
+
+​	The `symtab` stores information of each exported symbol in the form of *struct kernel_symbol*, which is defined in *include/linux/export.h*. The definition is 
+
+```c
+struct kernel_symbol {
+	int value_offset;
+	int name_offset;
+	int namespace_offset;
+};
+```
+
+or
+
+```c
+struct kernel_symbol {
+	unsigned long value;
+	const char *name;
+	const char *namespace;
+};
+```
+
+​	For the formmer one, the field *value_offset* stores the offset from the address of this kernel symbol table entry to the address of this symbol. 
+
+​	Here is an example.
+
+<img src="pic/fgkaslr1.png" alt="fgkaslr1" style="zoom:50%;" />
+
+​	*commit_creds* is loaded at 0xffffffff8f414ea0.
+
+<img src="pic/fgkaslr1.png" alt="fgkaslr1" style="zoom:50%;" />
+
+And the entry of this symbol is loaded at 0xffffffff8fd87d90. Lets check what is store inside this entry
+
+<img src="pic/fgkaslr3.png" alt="fgkaslr1" style="zoom:50%;" />
+
+The *value_offset* equals 0xff68d110. A simple math
+
+```
+0xffffffff8fd87d90  +  (int)0xff68d110 = 0xffffffff8f414ea0
+  entry's address         value_offset       symbol's address
+```
+
+
+
+​	This reveals that we are able to get the load address of a symbol by reading its `symtab` entry. Using the gadgets metioned above,  we store the *value_offset* to register `eax`. This is often achived by rop, thus we may return to the user land using the *swapgs* retpoline, then read `eax` immediately
+
+```c
+__asm__(
+        "mov %0, rax\n"
+        : "=r"(offset_value)
+        :
+        :"memory"
+    );
+```
 
