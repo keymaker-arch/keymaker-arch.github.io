@@ -1,4 +1,4 @@
-# 1. Kernel pwn tricks
+# Kernel pwn tricks & machanisms
 
 ## 1.Kernel Security Protection Mechanisms
 
@@ -10,7 +10,7 @@
 
 
 
-# 2. Build a kernel for QEMU
+## 2. Build a kernel for QEMU
 
 ​	There is a configuration called tinyconfig, which can build a tiny version of Linux kernel, use it like
 
@@ -22,7 +22,7 @@ make tinyconfig
 
 
 
-# 3.Bypass KPTI 
+## 3.Bypass KPTI 
 
 ​	KPTI ( Kernel Page Table Isolation) is a kernel protection feature, which seperates the kernel-space page table and user space page table entirely.
 
@@ -91,7 +91,7 @@ When the execution hit the break point the address of *modprobe_path* will be at
 
 
 
-## 6. use *setxattr* to write arbitrary data to kernel heap
+## 6. write kernel heap chunk with *setxattr*
 
 ​	The implementation of *setxattr* is under *fs/xattr.c* as follows
 
@@ -210,4 +210,79 @@ __asm__(
         :"memory"
     );
 ```
+
+
+
+## 8. write kernel heap chunk with *msg_msg*
+
+​	struct *msg_msg* is a System V IPC mechanism that allow processes communicate messages with each other. It can be used to write data to kernel heap chunks allocated by *kmalloc()*, which will be useful to spray the kernel heap or write double-freed heap chunks.
+
+​	By invoking
+
+```c
+int qid = msgget(IPC_PRIVATE, IPC_CREAT);
+struct{
+    long mtype;
+    char mtext[MSGLEN];
+}msgbuf
+    
+msgsnd(qid, &msgbuf, MSGLEN, 0)
+```
+
+the kernel will allocate a heap chunk of size
+
+```c
+sizeof(struct msg_msg) + MSGLEN
+```
+
+then write a `struct msg_msg` to it followed by the user data `mtext[]`. The user data is fully user controllable, allowing us to write arbitrary data to the heap chunk.
+
+​	The struct `msg_msg` is defined in *include/linux/msg.h* as
+
+```c
+struct msg_msg {
+	struct list_head m_list;
+	long m_type;
+	size_t m_ts;		/* message text size */
+	struct msg_msgseg *next;
+	void *security;
+	/* the actual message follows immediately */
+};
+```
+
+an invoke to *msgsnd* is forwarded to *do_msgsnd* defind in *ipc/msg.c* as
+
+```c
+static long do_msgsnd(int msqid, long mtype, void __user *mtext,
+		size_t msgsz, int msgflg)
+{
+	struct msg_queue *msq;
+	struct msg_msg *msg;
+	.....
+
+	msg = load_msg(mtext, msgsz);
+	.....
+}
+```
+
+ *load_msg()* invokes *kmalloc()* to get a heap chunk and copy user data to it. It is defined in *ipc/msgutil.c* as
+
+```c
+struct msg_msg *load_msg(const void __user *src, size_t len)
+{
+	.....
+        
+	msg = alloc_msg(len);
+    
+	....
+        
+	if (copy_from_user(msg + 1, src, alen))
+		goto out_err;
+    .....
+}
+```
+
+
+
+
 
