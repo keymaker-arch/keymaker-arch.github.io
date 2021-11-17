@@ -44,17 +44,54 @@ make tinyconfig
    (user_ss)
 ```
 
-​	If the KPTI is enbled, ret2usr this way will resuling in a segment fault when accessing the user space code. To bypass this mechanism we choose to perform ret2usr by `swapgs_restore_regs_and_return_to_usermode`. It is a exported symbol in kernel to return to user space from kenrel space. The implementatino is like
+​	If the KPTI is enbled, ret2usr this way will resulting in a segment fault when accessing the user space code. To bypass this mechanism we choose to perform ret2usr by `swapgs_restore_regs_and_return_to_usermode`. It is a exported symbol in kernel and we can read its address from */proc/kallsyms*. The implementatino is like
 
+```assembly
+0x00    pop    %r15
+        pop    %r14
+        pop    %r13
+        pop    %r12
+        pop    %rbp
+        pop    %rbx
+        pop    %r11
+        pop    %r10
+        pop    %r9
+        pop    %r8
+        pop    %rax
+        pop    %rcx
+        pop    %rdx
+        pop    %rsi
+0x16    mov    %rsp,%rdi		<== ret to this place
+        mov    %gs:0x5004,%rsp
+        pushq  0x30(%rdi)
+        .....
+```
 
+to bypass KPTI we set the ROP chain as follows
 
-
+```c
+    swapgs_restore_regs_and_return_to_usermode+0x16    <-  esp
+-------------------------------------------------
+    				 0
+-------------------------------------------------
+            		 0
+-------------------------------------------------
+ 				(target_rip)
+-------------------------------------------------
+   			      (user_cs)
+-------------------------------------------------
+                (user_rflags)
+-------------------------------------------------
+                 (user_sp)
+-------------------------------------------------
+                 (user_ss)
+```
 
 
 
 ## 4. find *modprobe_path*
 
-​	When the compile option `CONFIG_KALLSYMS_ALL` is not turned on, which was defaut, the symble *modprob_path* is not exported to */proc/kallsyms*, making it impossible to get it by directly reading the file. We can get its address by setting a break to *call_usermodehelper_setup*.
+​	When the compile option `CONFIG_KALLSYMS_ALL` is turned off, which was defaut, the symble *modprob_path* is not exported to */proc/kallsyms*, making it impossible to get it by directly reading the file. We can get its address by setting a break to *call_usermodehelper_setup*.
 
 ​	The symbol *call_usermodehelper_setup* is exported to */proc/kallsyms* by default, so we can get it in most cases by reading */proc/kallsyms*. The implementation in kernel is like
 
@@ -62,8 +99,7 @@ make tinyconfig
 static int call_modprobe(char *module_name, int wait)
 {
     .....
-    info = call_usermodehelper_setup(modprobe_path, argv, envp, GFP_KERNEL,
-					 NULL, free_modprobe_argv, NULL);
+    info = call_usermodehelper_setup(modprobe_path, argv, envp, GFP_KERNEL, NULL, free_modprobe_argv, NULL);
     .....
 }
 ```
@@ -235,7 +271,7 @@ the kernel will allocate a heap chunk of size
 sizeof(struct msg_msg) + MSGLEN
 ```
 
-then write a `struct msg_msg` to it followed by the user data `mtext[]`. The user data is fully user controllable, allowing us to write arbitrary data to the heap chunk.
+then write a `struct msg_msg` to it, followed by the user data `mtext[]`. The user data is fully user controllable, allowing us to write arbitrary data to the heap chunk.
 
 ​	The struct `msg_msg` is defined in *include/linux/msg.h* as
 
@@ -279,6 +315,25 @@ struct msg_msg *load_msg(const void __user *src, size_t len)
 	if (copy_from_user(msg + 1, src, alen))
 		goto out_err;
     .....
+}
+```
+
+*alloc_msg()* is also defined in *ipc/msgutil.c* as
+
+```c
+static struct msg_msg *alloc_msg(size_t len)
+{
+	.....
+        
+	msg = kmalloc(sizeof(*msg) + alen, GFP_KERNEL_ACCOUNT);
+    
+	.....
+        
+	while (len > 0) {
+        // routine if the message len is larger than a page
+		.....
+	}
+.....
 }
 ```
 
