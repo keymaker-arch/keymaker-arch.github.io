@@ -414,3 +414,28 @@ typedef unsigned int __u32;
 
 
 
+## 11. work_for_cpu_fn
+
+​	The function have a form
+
+```c
+static void work_for_cpu_fn(size_t * args)
+{
+    args[6] = ((size_t (*) (size_t)) (args[4](args[5]));
+}
+```
+
+It invokes `args[4]` and pass `args[5]` as argument, and store the return value to `args[6]`. This can be useful when we control a tty struct.
+
+​	This function is exported to *kallsyms* in systems support multi cores. We overwrite the `ioctl` to `work_for_cpu_fn`, when we invoke `ioctl` of the tty struct, the `args` will be the address of the tty struct. And we can place function pointers at `tty_strut[4]` and argument at `tty_struct[5]`. The return value will be written to `tty_struct[6]`.
+
+​	In the case we want to perform `commit_creds(prepare_kernel_cred(0))`, we can first set `tty_struct[4]` to address of `prepare_kernel_cred()` and set `tty_struct[5]` to 0. After invoking `ioctl`, the address of root cred struct will be written to `tty_struct[6]`, and need to read it (by exploiting vulnerability). Then we set `tty_struct[4]` to address of `commit_creds()`, and palce the address of the root cred struct at `tty_struct[5]`. Then invoke `ioctl` again.
+
+​	During the two invokes nothing else in the kernel is touched so we can always expect the kernel `ioctl` returned cleanly.
+
+​	Generally, this technique needs the following preconditions
+
+> 1. able to control tty_struct: overwrite tty_strut.tty_ops, and fake the tty_ops, at least pointer of ioctl
+> 2. able to write tty_struct[4] and tty_struct[5]
+> 3. able to read tty_struct[6]
+
